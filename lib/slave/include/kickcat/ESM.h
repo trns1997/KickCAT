@@ -1,6 +1,7 @@
 #ifndef SLAVE_STACK_INCLUDE_ESM_H_
 #define SLAVE_STACK_INCLUDE_ESM_H_
 
+#include <functional>
 #include "PDO.h"
 #include "kickcat/AbstractESC.h"
 #include "kickcat/protocol.h"
@@ -59,8 +60,11 @@ namespace kickcat
             friend StateMachine;
 
         public:
+            using Hook = std::function<void(Context, Context)>;
+
             AbstractState(uint8_t id, AbstractESC& esc, PDO& pdo);
             void setMailbox(mailbox::response::Mailbox* mbx);
+            void setHook(Hook hook) { hook_ = std::move(hook); }
             virtual Context routine(Context currentStatus, ALControl alControl);
             virtual void onEntry(Context oldStatus, Context newStatus);
 
@@ -69,6 +73,7 @@ namespace kickcat
             AbstractESC& esc_;
             PDO& pdo_;
             mailbox::response::Mailbox* mbx_{};
+            Hook hook_;
 
             virtual Context routineInternal(Context currentStatus, ALControl alControl) = 0;
 

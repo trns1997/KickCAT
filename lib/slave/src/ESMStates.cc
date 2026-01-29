@@ -161,6 +161,11 @@ namespace kickcat::ESM
             pdo_.activateOuput(true);
             pdo_.activateInput(true);
         }
+
+        if (hook_)
+        {
+            hook_(oldStatus, newStatus);
+        }
     }
 
     Context SafeOP::routineInternal(Context currentStatus, ALControl control)

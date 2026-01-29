@@ -20,6 +20,8 @@ namespace kickcat::slave
         State state();
         void validateOutputData();
 
+        void onSafeOp(ESM::AbstractState::Hook hook) { safeOP_.setHook(std::move(hook)); }
+
     private:
         AbstractESC* esc_;
         mailbox::response::Mailbox* mbx_{nullptr};
