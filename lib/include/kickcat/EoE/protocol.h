@@ -61,6 +61,24 @@ namespace kickcat::EoE
 
         char const* toString(uint16_t result);
     }
+
+    /// IP parameter structure for EoE SET/GET IP parameter requests
+    struct IpParam
+    {
+        bool mac_set{false};
+        bool ip_set{false};
+        bool subnet_set{false};
+        bool gateway_set{false};
+        bool dns_ip_set{false};
+        bool dns_name_set{false};
+
+        MAC      mac{};
+        IP       ip{};
+        IP       subnet{};
+        IP       gateway{};
+        IP       dns_ip{};
+        DNS_NAME dns_name{};
+    };
 }
 
 #endif

@@ -10,3 +10,16 @@ add_custom_command(
         TARGET ${TARGET_NAME}
         POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} ARGS -S -O binary ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME} ${CMAKE_BINARY_DIR}/${TARGET_NAME}.bin)
+
+set(TARGET_NAME_EOE easycat_frdm_k64f_eoe)
+add_executable(${TARGET_NAME_EOE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/main_eoe.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/od_populator.cc
+    ${CMAKE_SOURCE_DIR}/examples/slave/common/xpg_strerror_r.cc)
+target_link_libraries(${TARGET_NAME_EOE} kickcat)
+set_kickcat_properties(${TARGET_NAME_EOE})
+
+add_custom_command(
+        TARGET ${TARGET_NAME_EOE}
+        POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} ARGS -S -O binary ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME_EOE} ${CMAKE_BINARY_DIR}/${TARGET_NAME_EOE}.bin)

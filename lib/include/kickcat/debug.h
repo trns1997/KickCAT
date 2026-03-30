@@ -198,6 +198,25 @@ namespace kickcat
 #else
     #define dc_info    _none
 #endif
+
+
+#ifdef DEBUG_EOE_ERROR
+    #define eoe_error   _error
+#else
+    #define eoe_error   _none
+#endif
+
+#ifdef DEBUG_EOE_WARNING
+    #define eoe_warning _warning
+#else
+    #define eoe_warning _none
+#endif
+
+#ifdef DEBUG_EOE_INFO
+    #define eoe_info    _info
+#else
+    #define eoe_info    _none
+#endif
 }
 
 #endif

@@ -16,6 +16,8 @@ set(KICKCAT_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/CoE/CiA/DS402/StateMachine.cc
 
   ${CMAKE_CURRENT_SOURCE_DIR}/src/EoE/protocol.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/EoE/mailbox/request.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/EoE/mailbox/response.cc
 )
 
 

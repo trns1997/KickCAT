@@ -10,6 +10,7 @@
 #include "kickcat/AbstractESC.h"
 #include "CoE/OD.h"
 #include "CoE/protocol.h"
+#include "kickcat/EoE/protocol.h"
 
 
 namespace kickcat
@@ -127,6 +128,16 @@ namespace kickcat::mailbox::request
         std::shared_ptr<AbstractMessage> createSDOInfoGetED(uint16_t index, uint8_t subindex, uint8_t value_info,
                                                             void* data, uint32_t* data_size, nanoseconds timeout = 20ms);
 
+        // EoE factory methods
+        std::shared_ptr<AbstractMessage> createEoESetIp(uint8_t port, EoE::IpParam const& params, nanoseconds timeout = 1s);
+        std::shared_ptr<AbstractMessage> createEoEGetIp(uint8_t port, EoE::IpParam& params, nanoseconds timeout = 1s);
+
+        /// \brief Fragment and queue an Ethernet frame for delivery to the slave via EoE
+        /// \param port         EoE port number on the slave
+        /// \param frame        Raw Ethernet frame data
+        /// \param size         Frame size in bytes
+        void queueEoEFrame(uint8_t port, uint8_t const* frame, uint16_t size);
+
         // helper to get next message to send and transfer it to reception callbacks if required
         std::shared_ptr<AbstractMessage> send();
 
@@ -140,6 +151,7 @@ namespace kickcat::mailbox::request
         std::list <std::shared_ptr<AbstractMessage>> to_process;  // message already sent, waiting for an answer
 
         uint8_t nextCounter();
+        uint8_t eoe_frame_counter{0};  // rolling EoE frame number (0-15)
 
         std::vector<CoE::Emergency> emergencies;
     private:
@@ -187,6 +199,19 @@ namespace kickcat::mailbox::response
         void enableCoE(CoE::Dictionary&& dictionary);
         CoE::Dictionary& getDictionary(){return dictionary_;}
 
+        /// \brief Enable EoE support: register handlers for SET/GET IP and frame data
+        /// \param initial_ip       Initial IP configuration reported to the master
+        /// \param on_frame_received Callback invoked for each reassembled Ethernet frame
+        void enableEoE(EoE::IpParam const& initial_ip,
+                       std::function<void(uint8_t const*, uint16_t)> on_frame_received);
+
+        /// \brief Fragment and queue an Ethernet frame to be sent to the master via EoE
+        void queueEoEFrame(uint8_t port, uint8_t const* frame, uint16_t size);
+
+        // Accessors used by EoE response handlers
+        EoE::IpParam& eoeIpParam()                                          { return eoe_ip_; }
+        std::function<void(uint8_t const*, uint16_t)> const& eoeOnFrame() const { return eoe_on_frame_; }
+
         // --- ESC-coupled methods (requires to pass the ESC to the constructor) ---
         int32_t configure();
         bool isConfigOk();
@@ -225,6 +250,10 @@ namespace kickcat::mailbox::response
 
         std::vector<std::function<std::shared_ptr<AbstractMessage>(Mailbox*, std::vector<uint8_t>&&)>> factories_;
         CoE::Dictionary dictionary_;
+
+        EoE::IpParam eoe_ip_{};
+        std::function<void(uint8_t const*, uint16_t)> eoe_on_frame_{};
+        uint8_t eoe_frame_counter_{0};
 
         std::list<std::shared_ptr<AbstractMessage>> to_process_;    /// Received messages, waiting to be processed
         std::queue<std::vector<uint8_t>> to_send_;                  /// Messages to send (replies from a received messages)

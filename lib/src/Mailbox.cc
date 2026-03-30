@@ -5,6 +5,8 @@
 #include "debug.h"
 #include "CoE/mailbox/request.h"
 #include "CoE/mailbox/response.h"
+#include "EoE/mailbox/request.h"
+#include "kickcat/EoE/mailbox/response.h"
 #include "Error.h"
 #include "Mailbox.h"
 #include "protocol.h"
@@ -127,6 +129,87 @@ namespace kickcat::mailbox::request
         sdo->setCounter(nextCounter());
         to_send.push(sdo);
         return sdo;
+    }
+
+
+    std::shared_ptr<AbstractMessage> Mailbox::createEoESetIp(uint8_t port, EoE::IpParam const& params, nanoseconds timeout)
+    {
+        if (recv_size == 0)
+        {
+            THROW_ERROR("This mailbox is inactive");
+        }
+        auto msg = std::make_shared<EoESetIpMessage>(recv_size, port, params, timeout);
+        msg->setCounter(nextCounter());
+        to_send.push(msg);
+        return msg;
+    }
+
+
+    std::shared_ptr<AbstractMessage> Mailbox::createEoEGetIp(uint8_t port, EoE::IpParam& params, nanoseconds timeout)
+    {
+        if (recv_size == 0)
+        {
+            THROW_ERROR("This mailbox is inactive");
+        }
+        auto msg = std::make_shared<EoEGetIpMessage>(recv_size, port, &params, timeout);
+        msg->setCounter(nextCounter());
+        to_send.push(msg);
+        return msg;
+    }
+
+
+    void Mailbox::queueEoEFrame(uint8_t port, uint8_t const* frame, uint16_t size)
+    {
+        if (recv_size == 0)
+        {
+            THROW_ERROR("This mailbox is inactive");
+        }
+
+        // Maximum fragment payload = mailbox size - mailbox header (6) - EoE header (4)
+        uint16_t max_frag = static_cast<uint16_t>(recv_size - sizeof(mailbox::Header) - sizeof(EoE::Header));
+        // Round down to 32-byte boundary (ETG1000.6 requirement)
+        max_frag = (max_frag >> 5) << 5;
+
+        if (max_frag == 0)
+        {
+            THROW_ERROR("Mailbox too small for EoE fragmentation");
+        }
+
+        eoe_frame_counter = (eoe_frame_counter + 1) & 0xF;
+
+        uint8_t  fragment_no = 0;
+        uint16_t offset      = 0;
+
+        while (offset < size)
+        {
+            uint16_t frag_size = size - offset;
+            bool is_last = (frag_size <= max_frag);
+            if (!is_last)
+            {
+                frag_size = max_frag;
+            }
+
+            uint16_t offset_32;
+            if (fragment_no == 0)
+            {
+                // First fragment: offset encodes total frame size in 32-byte units (rounded up)
+                offset_32 = static_cast<uint16_t>((size + 31) >> 5);
+            }
+            else
+            {
+                // Continuation: offset encodes current byte position in 32-byte units
+                offset_32 = static_cast<uint16_t>(offset >> 5);
+            }
+
+            auto frag = std::make_shared<EoEFrameFragment>(
+                recv_size, port, fragment_no, eoe_frame_counter, offset_32, is_last,
+                frame + offset, frag_size);
+            frag->setCounter(nextCounter());
+            to_send.push(frag);
+
+            offset += frag_size;
+            fragment_no++;
+        }
     }
 
 
@@ -493,6 +576,85 @@ namespace kickcat::mailbox::response
         //TODO: take the factory instead to be able to reset the dictionary when going back to init
         dictionary_ = std::move(dictionary);
         factories_.push_back(&createSDOMessage);
+    }
+
+    void Mailbox::enableEoE(EoE::IpParam const& initial_ip,
+                            std::function<void(uint8_t const*, uint16_t)> on_frame_received)
+    {
+        eoe_ip_       = initial_ip;
+        eoe_on_frame_ = std::move(on_frame_received);
+        factories_.push_back(&createEoEMessage);
+    }
+
+    void Mailbox::queueEoEFrame(uint8_t port, uint8_t const* frame, uint16_t size)
+    {
+        uint16_t mbx_size = mbx_in_.length;
+        if (mbx_size == 0)
+        {
+            return;
+        }
+
+        uint16_t max_frag = static_cast<uint16_t>(mbx_size - sizeof(mailbox::Header) - sizeof(EoE::Header));
+        max_frag = (max_frag >> 5) << 5;
+
+        if (max_frag == 0)
+        {
+            return;
+        }
+
+        eoe_frame_counter_ = (eoe_frame_counter_ + 1) & 0xF;
+
+        uint8_t  fragment_no = 0;
+        uint16_t offset      = 0;
+
+        while (offset < size)
+        {
+            uint16_t frag_size = size - offset;
+            bool is_last = (frag_size <= max_frag);
+            if (!is_last)
+            {
+                frag_size = max_frag;
+            }
+
+            uint16_t offset_32;
+            if (fragment_no == 0)
+            {
+                // First fragment: offset encodes total frame size in 32-byte units (rounded up)
+                offset_32 = static_cast<uint16_t>((size + 31) >> 5);
+            }
+            else
+            {
+                // Continuation: offset encodes current byte position in 32-byte units
+                offset_32 = static_cast<uint16_t>(offset >> 5);
+            }
+
+            // Build the raw fragment message
+            std::vector<uint8_t> msg(mbx_size, 0);
+            auto* header = pointData<mailbox::Header>(msg.data());
+            auto* eoe    = pointData<EoE::Header>(header);
+            auto* data   = pointData<uint8_t>(eoe);
+
+            header->type     = mailbox::Type::EoE;
+            header->len      = static_cast<uint16_t>(sizeof(EoE::Header) + frag_size);
+            header->priority = 0;
+            header->channel  = 0;
+
+            eoe->type            = 0;  // FRAG_DATA
+            eoe->port            = port;
+            eoe->last_fragment   = is_last ? 1 : 0;
+            eoe->time_appended   = 0;
+            eoe->time_request    = 0;
+            eoe->fragment_number = fragment_no & 0x3F;
+            eoe->offset          = offset_32  & 0x3F;
+            eoe->frame_number    = eoe_frame_counter_ & 0xF;
+
+            std::memcpy(data, frame + offset, frag_size);
+
+            to_send_.push(std::move(msg));
+
+            offset += frag_size;
+            fragment_no++;
+        }
     }
 
     void Mailbox::replyError(std::vector<uint8_t>&& raw_message, uint16_t code)

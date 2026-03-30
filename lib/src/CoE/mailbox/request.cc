@@ -3,6 +3,7 @@
 
 #include "debug.h"
 #include "kickcat/CoE/mailbox/request.h"
+#include "kickcat/EoE/protocol.h"
 
 namespace kickcat::mailbox::request
 {
@@ -424,6 +425,16 @@ namespace kickcat::mailbox::request
                 return ProcessingResult::FINALIZE_AND_KEEP;
             }
             return ProcessingResult::NOOP;
+        }
+
+        // EoE FRAG_DATA (type=0): pass through so EoEReceiveMessage can process it
+        if (header->type == mailbox::Type::EoE)
+        {
+            auto const* eoe = pointData<EoE::Header>(header);
+            if (eoe->type == 0)
+            {
+                return ProcessingResult::NOOP;
+            }
         }
 
         Type type = static_cast<Type>(header->type);
