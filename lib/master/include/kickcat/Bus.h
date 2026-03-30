@@ -5,6 +5,7 @@
 
 #include "kickcat/Error.h"
 #include "kickcat/Frame.h"
+#include "kickcat/EoE/protocol.h"
 #include "AbstractLink.h"
 #include "Slave.h"
 
@@ -141,6 +142,37 @@ namespace kickcat
         // global call timeout will be at most N * timeout (with N the number of subindex to reached)
         void readSDO (Slave& slave, uint16_t index, uint8_t subindex, Access CA, void* data, uint32_t* data_size, nanoseconds timeout = 1s);
         void writeSDO(Slave& slave, uint16_t index, uint8_t subindex, Access CA, void const* data, uint32_t data_size, nanoseconds timeout = 1s);
+
+        /// \brief  Send EoE SET IP parameter request to a slave (blocking)
+        /// \param  slave   Target slave (must support EoE)
+        /// \param  port    EoE port number on the slave (usually 0)
+        /// \param  params  IP parameters to set; only fields with *_set == true are sent
+        /// \param  timeout Per-message timeout
+        void setEoEIp(Slave& slave, uint8_t port, EoE::IpParam const& params, nanoseconds timeout = 1s);
+
+        /// \brief  Send EoE GET IP parameter request to a slave (blocking)
+        /// \param  slave   Target slave (must support EoE)
+        /// \param  port    EoE port number on the slave (usually 0)
+        /// \param  params  Filled with the slave's current IP configuration on success
+        /// \param  timeout Per-message timeout
+        void getEoEIp(Slave& slave, uint8_t port, EoE::IpParam& params, nanoseconds timeout = 1s);
+
+        /// \brief  Fragment and enqueue an Ethernet frame for delivery to a slave via EoE
+        /// \details Non-blocking: the frame is split into mailbox-sized fragments and placed
+        ///          in the slave's send queue. The bus RT loop drains the queue.
+        /// \param  slave   Target slave (must support EoE)
+        /// \param  port    EoE port number on the slave (usually 0)
+        /// \param  frame   Raw Ethernet frame bytes
+        /// \param  size    Frame length in bytes
+        void queueEoEFrame(Slave& slave, uint8_t port, uint8_t const* frame, uint16_t size);
+
+        /// \brief  Register a callback to receive Ethernet frames delivered by a slave via EoE
+        /// \details Installs a persistent EoEReceiveMessage in the slave's mailbox receive queue.
+        ///          The callback is called (from within processMessages()) whenever a complete
+        ///          Ethernet frame has been reassembled from incoming fragments.
+        /// \param  slave       Target slave
+        /// \param  callback    Called with (frame_data, frame_size) for each complete frame
+        void enableEoEReceive(Slave& slave, std::function<void(uint8_t const*, uint16_t)> callback);
 
         /// \brief  Add a gateway message to the bus
         /// \param  raw_message         A raw EtherCAT mailbox message

@@ -52,28 +52,28 @@ info "Defconfig:    $DEFCONFIG_SRC"
 info "NuttX src:    $nuttx_src"
 info "Build dir:    $build_dir"
 
-mkdir -p "$build_dir"
+# mkdir -p "$build_dir"
 
-step "Configuring NuttX"
-make -C "$nuttx_src" distclean || true
+# step "Configuring NuttX"
+# make -C "$nuttx_src" distclean || true
 
-NUTTX_CONFIG_PATH="$nuttx_src/boards/${BOARD_PATH}/configs/${CONFIG_NAME}"
-mkdir -p "$NUTTX_CONFIG_PATH"
-cp "$DEFCONFIG_SRC" "$NUTTX_CONFIG_PATH/defconfig"
+# NUTTX_CONFIG_PATH="$nuttx_src/boards/${BOARD_PATH}/configs/${CONFIG_NAME}"
+# mkdir -p "$NUTTX_CONFIG_PATH"
+# cp "$DEFCONFIG_SRC" "$NUTTX_CONFIG_PATH/defconfig"
 
-"$nuttx_src/tools/configure.sh" -l -E "${BOARD}:${CONFIG_NAME}"
-success "NuttX configured."
+# "$nuttx_src/tools/configure.sh" -l -E "${BOARD}:${CONFIG_NAME}"
+# success "NuttX configured."
 
-step "Exporting NuttX"
-make -C "$nuttx_src" export -j$(nproc)
+# step "Exporting NuttX"
+# make -C "$nuttx_src" export -j$(nproc)
 
-rm -rf "${build_dir}/nuttx-export"
-mkdir -p "${build_dir}/nuttx-export"
+# rm -rf "${build_dir}/nuttx-export"
+# mkdir -p "${build_dir}/nuttx-export"
 
-tar xf "$nuttx_src"/nuttx-export-*.tar.gz \
-    --strip-components=1 \
-    -C "${build_dir}/nuttx-export"
-success "NuttX exported."
+# tar xf "$nuttx_src"/nuttx-export-*.tar.gz \
+#     --strip-components=1 \
+#     -C "${build_dir}/nuttx-export"
+# success "NuttX exported."
 
 step "Building KickCAT slave for $BOARD"
 cmake \
