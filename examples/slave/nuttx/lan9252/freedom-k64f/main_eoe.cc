@@ -98,8 +98,11 @@ int main(int argc, char *argv[])
 
     slave.start();
 
-    // Init sensor
-    int sensor_fd = open("/dev/accel0", O_RDONLY);
+    // Init sensor — O_NONBLOCK so read() returns EAGAIN instead of blocking
+    // when no new sample is ready.  Without this, slave.routine() (mailbox
+    // service) is only called when the sensor produces data, causing EoE
+    // mailbox timeouts on the master side.
+    int sensor_fd = open("/dev/accel0", O_RDONLY | O_NONBLOCK);
     if (sensor_fd < 0)
     {
         printf("Failed to open sensor device\n");
@@ -156,7 +159,10 @@ int main(int argc, char *argv[])
         }
         else if (state == State::OPERATIONAL)
         {
-            if (read(sensor_fd, &sensor_data, sizeof(sensor_data)) == sizeof(sensor_data))
+            // Non-blocking read: only update if a full sample is available.
+            // EAGAIN means no new data yet — keep the previous values.
+            ssize_t n = read(sensor_fd, &sensor_data, sizeof(sensor_data));
+            if (n == sizeof(sensor_data))
             {
                 *ax = sensor_data.accel.x;
                 *ay = sensor_data.accel.y;

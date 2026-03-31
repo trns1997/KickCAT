@@ -427,14 +427,11 @@ namespace kickcat::mailbox::request
             return ProcessingResult::NOOP;
         }
 
-        // EoE FRAG_DATA (type=0): pass through so EoEReceiveMessage can process it
+        // All EoE messages: pass through so dedicated EoE handlers can process them
+        // (EoEReceiveMessage for FRAG_DATA, EoEGetIpMessage/EoESetIpMessage for IP config)
         if (header->type == mailbox::Type::EoE)
         {
-            auto const* eoe = pointData<EoE::Header>(header);
-            if (eoe->type == 0)
-            {
-                return ProcessingResult::NOOP;
-            }
+            return ProcessingResult::NOOP;
         }
 
         Type type = static_cast<Type>(header->type);
