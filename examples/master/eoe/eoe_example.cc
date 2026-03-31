@@ -132,6 +132,9 @@ int main(int argc, char* argv[])
 
     uint8_t io_buffer[2048]{};
 
+    // Declared here so it is accessible both inside and after the init block.
+    Slave* eoe_slave = nullptr;
+
     try
     {
         printf("Initializing bus...\n");
@@ -143,6 +146,78 @@ int main(int argc, char* argv[])
         printf("Switching to SAFE_OP...\n");
         bus.requestState(State::SAFE_OP);
         bus.waitForState(State::SAFE_OP, 3s);
+
+        // ------------------------------------------------------------------
+        // EoE IP configuration must happen HERE — in SAFE_OP, before any
+        // PDO exchange.  The SM2 (output) watchdog is only armed by the
+        // first successful LWR write, which happens inside the OPERATIONAL
+        // cyclic callback below.  Calling waitForMessage after OPERATIONAL
+        // is reached stops PDO exchange and causes the watchdog to fire,
+        // dropping the slave back to SAFE_OP and timing out the mailbox.
+        // ------------------------------------------------------------------
+
+        // Find first EoE-capable slave
+        for (auto& slave : bus.slaves())
+        {
+            if (slave.sii.supported_mailbox & eeprom::MailboxProtocol::EoE)
+            {
+                eoe_slave = &slave;
+                printf("Found EoE slave at address %d (vendor 0x%08x product 0x%08x)\n",
+                       slave.address, slave.sii.vendor_id, slave.sii.product_code);
+                break;
+            }
+        }
+
+        if (eoe_slave == nullptr)
+        {
+            printf("No EoE-capable slave detected on the bus.\n");
+            printf("(This example requires a slave that advertises EoE in its SII EEPROM.)\n");
+            return 0;
+        }
+
+        // GET IP: query current IP configuration from the slave
+        printf("\n--- GET IP ---\n");
+        try
+        {
+            EoE::IpParam current{};
+            bus.getEoEIp(*eoe_slave, 0, current);
+            if (!current.mac_set && !current.ip_set)
+            {
+                printf("Slave returned empty IP configuration.\n");
+            }
+            else
+            {
+                printIpParam("  Current", current);
+            }
+        }
+        catch (std::exception const& e)
+        {
+            printf("GET IP failed: %s\n", e.what());
+        }
+
+        // SET IP: configure the slave with a static address
+        printf("\n--- SET IP ---\n");
+        try
+        {
+            EoE::IpParam config{};
+            config.ip_set  = true;  config.ip[0]     = 192; config.ip[1]     = 168;
+                                    config.ip[2]     = 1;   config.ip[3]     = 100;
+            config.subnet_set = true; config.subnet[0] = 255; config.subnet[1] = 255;
+                                      config.subnet[2] = 255; config.subnet[3] = 0;
+            config.gateway_set = true; config.gateway[0] = 192; config.gateway[1] = 168;
+                                       config.gateway[2] = 1;   config.gateway[3] = 1;
+            config.mac_set = true;
+            config.mac[0] = 0x02; config.mac[1] = 0x00; config.mac[2] = 0x00;
+            config.mac[3] = 0x00; config.mac[4] = 0x00; config.mac[5] = 0x01;
+
+            bus.setEoEIp(*eoe_slave, 0, config);
+            printf("SET IP succeeded:\n");
+            printIpParam("  New", config);
+        }
+        catch (std::exception const& e)
+        {
+            printf("SET IP failed: %s\n", e.what());
+        }
 
         // Provide valid outputs so slaves can leave SAFE_OP
         for (auto& slave : bus.slaves())
@@ -172,29 +247,7 @@ int main(int argc, char* argv[])
     }
 
     // ------------------------------------------------------------------
-    // Find first EoE-capable slave
-    // ------------------------------------------------------------------
-    Slave* eoe_slave = nullptr;
-    for (auto& slave : bus.slaves())
-    {
-        if (slave.sii.supported_mailbox & eeprom::MailboxProtocol::EoE)
-        {
-            eoe_slave = &slave;
-            printf("Found EoE slave at address %d (vendor 0x%08x product 0x%08x)\n",
-                   slave.address, slave.sii.vendor_id, slave.sii.product_code);
-            break;
-        }
-    }
-
-    if (eoe_slave == nullptr)
-    {
-        printf("No EoE-capable slave detected on the bus.\n");
-        printf("(This example requires a slave that advertises EoE in its SII EEPROM.)\n");
-        return 0;
-    }
-
-    // ------------------------------------------------------------------
-    // Register receive callback
+    // Register receive callback (done after OPERATIONAL is confirmed)
     // ------------------------------------------------------------------
     std::atomic<uint32_t> received_frames{0};
 
@@ -210,54 +263,6 @@ int main(int argc, char* argv[])
                    data[6], data[7], data[8], data[9], data[10], data[11],
                    data[12], data[13]);
         });
-
-    // ------------------------------------------------------------------
-    // GET IP: query current IP configuration from the slave
-    // ------------------------------------------------------------------
-    printf("\n--- GET IP ---\n");
-    try
-    {
-        EoE::IpParam current{};
-        bus.getEoEIp(*eoe_slave, 0, current);
-        if (!current.mac_set && !current.ip_set)
-        {
-            printf("Slave returned empty IP configuration.\n");
-        }
-        else
-        {
-            printIpParam("  Current", current);
-        }
-    }
-    catch (std::exception const& e)
-    {
-        printf("GET IP failed: %s\n", e.what());
-    }
-
-    // ------------------------------------------------------------------
-    // SET IP: configure the slave with a static address
-    // ------------------------------------------------------------------
-    printf("\n--- SET IP ---\n");
-    try
-    {
-        EoE::IpParam config{};
-        config.ip_set  = true;  config.ip[0]     = 192; config.ip[1]     = 168;
-                                config.ip[2]     = 1;   config.ip[3]     = 100;
-        config.subnet_set = true; config.subnet[0] = 255; config.subnet[1] = 255;
-                                  config.subnet[2] = 255; config.subnet[3] = 0;
-        config.gateway_set = true; config.gateway[0] = 192; config.gateway[1] = 168;
-                                   config.gateway[2] = 1;   config.gateway[3] = 1;
-        config.mac_set = true;
-        config.mac[0] = 0x02; config.mac[1] = 0x00; config.mac[2] = 0x00;
-        config.mac[3] = 0x00; config.mac[4] = 0x00; config.mac[5] = 0x01;
-
-        bus.setEoEIp(*eoe_slave, 0, config);
-        printf("SET IP succeeded:\n");
-        printIpParam("  New", config);
-    }
-    catch (std::exception const& e)
-    {
-        printf("SET IP failed: %s\n", e.what());
-    }
 
     // ------------------------------------------------------------------
     // Cyclic loop: send test frames, process incoming frames
