@@ -1,3 +1,10 @@
 add_executable(eoe_example eoe_example.cc)
 target_link_libraries(eoe_example kickcat argparse::argparse)
 set_kickcat_properties(eoe_example)
+
+find_package(OpenCV QUIET)
+if(OpenCV_FOUND)
+    add_executable(eoe_camera_master eoe_camera_master.cc)
+    target_link_libraries(eoe_camera_master kickcat argparse::argparse opencv::opencv)
+    set_kickcat_properties(eoe_camera_master)
+endif()
