@@ -2,19 +2,35 @@
 // EoE Camera Master
 //
 // Receives JPEG frame chunks from an EoE camera slave (RPi / LAN9252),
-// reassembles them, and displays the video stream at ≈30 fps using OpenCV.
+// reassembles them, and displays the video stream at ≈30 fps.
 //
 // Usage:
 //   sudo ./eoe_camera_master -i eth0
 //
-// The slave streams chunks over EoE mailbox messages.  Each chunk carries a
-// 12-byte ChunkHeader followed by up to 980 bytes of JPEG payload, sized so
-// that it fits in exactly one EoE mailbox exchange for a 1024-byte mailbox SM.
+// Mailbox optimisation
+// --------------------
+// configureMailboxStatusCheck(READ_CHECK) is called before createMapping().
+// This maps the slave's SM1 "mailbox full" bit into a spare bit of the LRD
+// logical frame, so can_read is updated as a zero-cost side-effect of the PDO
+// exchange — no extra FPRD for the status poll.
 //
-// The master polls the mailbox every loop iteration (no MailboxSequencer) to
-// maximise throughput.  At ≈1 ms round-trip the link can sustain roughly
-// 900 KB/s, which comfortably covers a 640×480 JPEG-60 stream at 30 fps
-// (~8–15 KB per frame, ~240–450 KB/s).
+// The cyclic loop therefore needs only:
+//   1. sendLogicalRead + sendLogicalWrite + finalizeDatagrams + processAwaitingFrames
+//      → PDO exchange + can_read update in a single round-trip
+//   2. sendReadMessages + finalizeDatagrams + processAwaitingFrames
+//      → FPRD to fetch the mailbox chunk (only if can_read == true)
+//
+// Lag control
+// -----------
+// The master always chases the latest frame_id.  Any assembler more than
+// STALE_FRAME_WINDOW frames behind the newest seen frame_id is discarded
+// immediately so partial reassemblies from slow frames never block the display.
+// When a new complete JPEG arrives it always overwrites the pending display
+// buffer (newest wins), so cv::imshow is always fed the freshest frame.
+//
+// Display is refreshed at ≈30 fps via a timestamp-gated cv::waitKey(1) call;
+// this removes the per-iteration 1ms waitKey penalty and lets the EtherCAT
+// loop spin as fast as the network allows.
 //
 
 #include <opencv2/opencv.hpp>
@@ -29,6 +45,7 @@
 
 #include "kickcat/Bus.h"
 #include "kickcat/Link.h"
+#include "kickcat/OS/Time.h"
 #include "kickcat/OS/Timer.h"
 #include "kickcat/Prints.h"
 #include "kickcat/helpers.h"
@@ -56,8 +73,7 @@ struct FrameAssembler
     uint16_t chunks_received{0};
     std::map<uint16_t, std::vector<uint8_t>> chunks;
 
-    FrameAssembler(uint32_t id, uint16_t total)
-        : frame_id(id), total_chunks(total) {}
+    FrameAssembler(uint32_t id, uint16_t total) : frame_id(id), total_chunks(total) {}
 
     bool isComplete() const { return chunks_received == total_chunks; }
 
@@ -88,16 +104,11 @@ int main(int argc, char* argv[])
 
     std::string red_iface;
     program.add_argument("-r", "--redundancy")
-        .help("redundancy interface (optional)")
         .default_value(std::string{""})
         .store_into(red_iface);
 
     try { program.parse_args(argc, argv); }
-    catch (std::runtime_error const& e)
-    {
-        std::cerr << e.what() << "\n" << program;
-        return 1;
-    }
+    catch (std::runtime_error const& e) { std::cerr << e.what() << "\n" << program; return 1; }
 
     // ------------------------------------------------------------------
     // Bus setup
@@ -111,18 +122,17 @@ int main(int argc, char* argv[])
     }
     catch (std::exception const& e) { std::cerr << e.what() << "\n"; return 1; }
 
-    auto report_red = []() { printf("Redundancy activated (cable loss detected)\n"); };
-    auto link = std::make_shared<Link>(sock_nom, sock_red, report_red);
+    auto link = std::make_shared<Link>(sock_nom, sock_red,
+                    []() { printf("Redundancy activated\n"); });
     link->setTimeout(2ms);
     link->checkRedundancyNeeded();
 
     Bus bus(link);
     uint8_t io_buf[128]{};
-
     Slave* eoe_slave = nullptr;
 
     // ------------------------------------------------------------------
-    // Initialise: INIT → PRE-OP → SAFE-OP → OP
+    // INIT → PRE-OP → SAFE-OP → OP
     // ------------------------------------------------------------------
     try
     {
@@ -130,21 +140,23 @@ int main(int argc, char* argv[])
         bus.init(100ms);
         printf("Detected %d slave(s)\n", bus.detectedSlaves());
 
+        // Must be called after init() (PRE-OP) and BEFORE createMapping().
+        // Maps slave SM1 "mailbox full" bit into every LRD logical frame so
+        // sendLogicalRead updates can_read without an extra FPRD round-trip.
+        bus.configureMailboxStatusCheck(MailboxStatusFMMU::READ_CHECK);
+
         bus.createMapping(io_buf);
 
         printf("Switching to SAFE_OP...\n");
         bus.requestState(State::SAFE_OP);
         bus.waitForState(State::SAFE_OP, 3s);
 
-        // Find the camera slave — prefer one that advertises EoE in SII,
-        // fall back to first available slave for quick PoC bring-up.
         for (auto& s : bus.slaves())
         {
             if (s.sii.supported_mailbox & eeprom::MailboxProtocol::EoE)
             {
                 eoe_slave = &s;
-                printf("Found EoE slave at address %d "
-                       "(vendor=0x%08x product=0x%08x)\n",
+                printf("Found EoE slave at address %d (vendor=0x%08x product=0x%08x)\n",
                        s.address, s.sii.vendor_id, s.sii.product_code);
                 break;
             }
@@ -152,8 +164,7 @@ int main(int argc, char* argv[])
         if (eoe_slave == nullptr && !bus.slaves().empty())
         {
             eoe_slave = &bus.slaves().front();
-            printf("No EoE-flagged slave; using slave at address %d\n",
-                   eoe_slave->address);
+            printf("No EoE-flagged slave; using slave at address %d\n", eoe_slave->address);
         }
         if (eoe_slave == nullptr)
         {
@@ -161,15 +172,14 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        // Zero slave outputs so it can leave SAFE_OP
+        // Zero slave outputs so the slave can leave SAFE_OP
         for (auto& s : bus.slaves())
         {
             for (int32_t i = 0; i < s.output.bsize; ++i)
                 s.output.data[i] = 0;
         }
 
-        // Cyclic PDO helper used by waitForState
-        auto cyclic = [&]()
+        auto cyclic_pdo = [&]()
         {
             auto noop = [](DatagramState const&){};
             bus.processDataRead(noop);
@@ -178,7 +188,7 @@ int main(int argc, char* argv[])
 
         printf("Switching to OPERATIONAL...\n");
         bus.requestState(State::OPERATIONAL);
-        bus.waitForState(State::OPERATIONAL, 3s, cyclic);
+        bus.waitForState(State::OPERATIONAL, 3s, cyclic_pdo);
         printf("Bus is OPERATIONAL\n");
     }
     catch (std::exception const& e)
@@ -189,21 +199,26 @@ int main(int argc, char* argv[])
 
     // ------------------------------------------------------------------
     // EoE receive callback — reassembles application-level JPEG chunks
+    // with stale-frame skipping for lag-free display
     // ------------------------------------------------------------------
     std::map<uint32_t, FrameAssembler> assemblers;
-    uint32_t last_displayed_frame = 0;
 
-    // Latest complete JPEG ready for display
+    // Number of frames a partial assembly may fall behind before we discard it.
+    // At 30 fps this equals ~100 ms of tolerance before a frame is abandoned.
+    static constexpr uint32_t STALE_FRAME_WINDOW = 3;
+
+    uint32_t max_seen_fid   = 0;
+    uint32_t last_shown_fid = 0;
+
     std::vector<uint8_t> pending_jpeg;
-    bool                 pending_ready = false;
+    bool                 pending_ready    = false;
+    uint32_t             pending_frame_id = 0;
 
     bus.enableEoEReceive(*eoe_slave,
         [&](uint8_t const* data, uint16_t size)
         {
             if (size < static_cast<uint16_t>(sizeof(ChunkHeader)))
-            {
-                return; // too short to contain a valid header
-            }
+                return;
 
             auto const* hdr   = reinterpret_cast<ChunkHeader const*>(data);
             uint32_t    fid   = hdr->frame_id;
@@ -211,69 +226,79 @@ int main(int argc, char* argv[])
             uint16_t    total = hdr->total_chunks;
             uint32_t    plen  = hdr->payload_len;
 
-            // Discard frames older than what we already displayed
-            if (fid < last_displayed_frame)
+            // Track the newest frame_id we have ever seen
+            if (fid > max_seen_fid)
             {
-                return;
+                max_seen_fid = fid;
+
+                // Evict assemblers that have fallen too far behind
+                for (auto it = assemblers.begin(); it != assemblers.end(); )
+                {
+                    if (max_seen_fid - it->first > STALE_FRAME_WINDOW)
+                        it = assemblers.erase(it);
+                    else
+                        ++it;
+                }
             }
+
+            // Discard chunks for frames that were already evicted
+            if (max_seen_fid - fid > STALE_FRAME_WINDOW)
+                return;
 
             if (assemblers.find(fid) == assemblers.end())
-            {
                 assemblers.emplace(fid, FrameAssembler(fid, total));
-            }
 
             auto& asmblr = assemblers.at(fid);
+            if (asmblr.chunks.find(cidx) != asmblr.chunks.end())
+                return; // duplicate
 
-            if (asmblr.chunks.find(cidx) == asmblr.chunks.end())
+            uint32_t payload_offset = static_cast<uint32_t>(sizeof(ChunkHeader));
+            if (plen > static_cast<uint32_t>(size) - payload_offset)
+                plen = static_cast<uint32_t>(size) - payload_offset;
+
+            asmblr.chunks[cidx] = std::vector<uint8_t>(
+                data + payload_offset,
+                data + payload_offset + plen);
+            asmblr.chunks_received++;
+
+            if (asmblr.isComplete())
             {
-                // Clamp payload to what was actually received
-                uint32_t payload_offset = static_cast<uint32_t>(sizeof(ChunkHeader));
-                if (plen > static_cast<uint32_t>(size) - payload_offset)
+                // Newest-wins: only update the display buffer if this frame
+                // is newer than whatever is already pending decode.
+                if (!pending_ready || fid > pending_frame_id)
                 {
-                    plen = static_cast<uint32_t>(size) - payload_offset;
+                    pending_jpeg     = asmblr.reassemble();
+                    pending_frame_id = fid;
+                    pending_ready    = true;
                 }
 
-                asmblr.chunks[cidx] = std::vector<uint8_t>(
-                    data + payload_offset,
-                    data + payload_offset + plen);
-                asmblr.chunks_received++;
-
-                if (asmblr.isComplete())
+                // Clean up this and any older assemblers
+                for (auto it = assemblers.begin(); it != assemblers.end(); )
                 {
-                    pending_jpeg  = asmblr.reassemble();
-                    pending_ready = true;
-                    last_displayed_frame = fid;
-
-                    // Clean up completed and stale assemblers
-                    for (auto it = assemblers.begin(); it != assemblers.end(); )
-                    {
-                        if (it->first <= fid)
-                            it = assemblers.erase(it);
-                        else
-                            ++it;
-                    }
+                    if (it->first <= fid)
+                        it = assemblers.erase(it);
+                    else
+                        ++it;
                 }
             }
         });
 
     // ------------------------------------------------------------------
-    // Cyclic loop: fast mailbox polling + display
+    // Cyclic loop: FMMU-driven mailbox read + timestamp-gated display
     // ------------------------------------------------------------------
-    // We intentionally avoid MailboxSequencer here to maximise read
-    // throughput: every iteration we check if the slave has data and
-    // immediately read it.  checkMailboxes bundles the SM-status read
-    // with the PDO LRD/LWR so there is no extra round-trip overhead.
-
-    link->setTimeout(2ms);
+    link->setTimeout(1ms);  // tighter timeout keeps the loop fast
 
     auto err_cb = [](DatagramState const& s)
     {
         THROW_ERROR_DATAGRAM("EtherCAT datagram error", s);
     };
 
-    cv::Mat        display_frame;
-    bool           window_opened = false;
-    uint32_t       frames_shown  = 0;
+    cv::Mat      display_frame;
+    bool         window_opened  = false;
+    uint32_t     frames_shown   = 0;
+    nanoseconds  last_display_t = since_epoch();
+
+    static constexpr nanoseconds DISPLAY_PERIOD = 33ms; // ≈30 fps
 
     printf("Starting EoE camera receive loop. Press 'q' to quit.\n");
 
@@ -281,53 +306,68 @@ int main(int argc, char* argv[])
     {
         try
         {
-            // PDO round-trip (keeps slave SM2 watchdog alive)
+            // ── Round-trip 1: PDO exchange + can_read update via FMMU ──
+            // sendLogicalRead reads the SM1 status bit that was mapped by
+            // configureMailboxStatusCheck(READ_CHECK) into the LRD frame.
+            // After processAwaitingFrames() returns, slave.mailbox.can_read
+            // reflects whether the slave's output mailbox has data — no extra
+            // FPRD needed.
             bus.sendLogicalRead(err_cb);
             bus.sendLogicalWrite(err_cb);
+            bus.finalizeDatagrams();
+            bus.processAwaitingFrames();
 
-            // Mailbox: read slave SM status → if data ready, fetch it
-            // processMessages dispatches into the EoE receive callback above.
-            bus.checkMailboxes(err_cb);
-            bus.processMessages(err_cb);
+            // ── Round-trip 2 (only if mailbox has data): fetch the chunk ──
+            // sendReadMessages checks can_read; if true it issues an FPRD to
+            // read the SM content, which triggers the EoE receive callback.
+            bus.sendReadMessages(err_cb);
+            bus.finalizeDatagrams();
+            bus.processAwaitingFrames();
         }
         catch (std::exception const& e)
         {
             printf("Loop error: %s\n", e.what());
         }
 
-        // Display if a new complete JPEG arrived during this iteration
-        if (pending_ready)
+        // ── Display gate: only decode + show at ≈30 fps ──
+        // Calling cv::waitKey(1) every iteration would add ≥1 ms of overhead
+        // per cycle; we batch that cost to the display period instead.
+        nanoseconds now = since_epoch();
+        if ((now - last_display_t) >= DISPLAY_PERIOD)
         {
-            cv::Mat img = cv::imdecode(pending_jpeg, cv::IMREAD_COLOR);
-            if (!img.empty())
+            last_display_t = now;
+
+            if (pending_ready)
             {
-                display_frame = img;
-                window_opened = true;
-                ++frames_shown;
-                if ((frames_shown % 30) == 0)
+                cv::Mat img = cv::imdecode(pending_jpeg, cv::IMREAD_COLOR);
+                if (!img.empty())
                 {
-                    printf("[Display] Showed %u frames  (latest frame_id=%u)\n",
-                           frames_shown, last_displayed_frame);
+                    display_frame = std::move(img);
+                    window_opened = true;
+                    ++frames_shown;
+                    if ((frames_shown % 30) == 0)
+                    {
+                        printf("[Display] %u frames shown, latest frame_id=%u  "
+                               "(dropped up to fid %u)\n",
+                               frames_shown, pending_frame_id,
+                               max_seen_fid > pending_frame_id
+                                   ? max_seen_fid - pending_frame_id : 0u);
+                    }
+                    last_shown_fid = pending_frame_id;
                 }
+                pending_ready = false;
             }
-            pending_ready = false;
-        }
 
-        if (window_opened)
-        {
-            cv::imshow("EoE Camera Stream", display_frame);
-        }
+            if (window_opened)
+                cv::imshow("EoE Camera Stream", display_frame);
 
-        // cv::waitKey(1) pumps the OpenCV event loop (~1 ms delay).
-        // 'q' or ESC quits.
-        int key = cv::waitKey(1);
-        if (key == 'q' || key == 27)
-        {
-            break;
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 27)
+                break;
         }
     }
 
     cv::destroyAllWindows();
-    printf("Done. Total frames displayed: %u\n", frames_shown);
+    printf("Done. Frames shown: %u  last frame_id: %u\n", frames_shown, last_shown_fid);
     return 0;
 }
