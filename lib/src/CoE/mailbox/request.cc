@@ -3,7 +3,6 @@
 
 #include "debug.h"
 #include "kickcat/CoE/mailbox/request.h"
-#include "kickcat/EoE/protocol.h"
 
 namespace kickcat::mailbox::request
 {

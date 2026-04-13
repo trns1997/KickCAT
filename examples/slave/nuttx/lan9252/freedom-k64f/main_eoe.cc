@@ -54,20 +54,30 @@ int main(int argc, char *argv[])
     // Enable EoE: initial IP config advertised to the master
     EoE::IpParam initial_ip{};
     initial_ip.ip_set = true;
-    initial_ip.ip[0] = 192; initial_ip.ip[1] = 168;
-    initial_ip.ip[2] = 1;   initial_ip.ip[3] = 200;
+    initial_ip.ip[0] = 192;
+    initial_ip.ip[1] = 168;
+    initial_ip.ip[2] = 1;
+    initial_ip.ip[3] = 200;
 
     initial_ip.subnet_set = true;
-    initial_ip.subnet[0] = 255; initial_ip.subnet[1] = 255;
-    initial_ip.subnet[2] = 255; initial_ip.subnet[3] = 0;
+    initial_ip.subnet[0] = 255;
+    initial_ip.subnet[1] = 255;
+    initial_ip.subnet[2] = 255;
+    initial_ip.subnet[3] = 0;
 
     initial_ip.gateway_set = true;
-    initial_ip.gateway[0] = 192; initial_ip.gateway[1] = 168;
-    initial_ip.gateway[2] = 1;   initial_ip.gateway[3] = 1;
+    initial_ip.gateway[0] = 192;
+    initial_ip.gateway[1] = 168;
+    initial_ip.gateway[2] = 1;
+    initial_ip.gateway[3] = 1;
 
     initial_ip.mac_set = true;
-    initial_ip.mac[0] = 0x02; initial_ip.mac[1] = 0x00; initial_ip.mac[2] = 0x00;
-    initial_ip.mac[3] = 0x00; initial_ip.mac[4] = 0x00; initial_ip.mac[5] = 0x02;
+    initial_ip.mac[0] = 0x02;
+    initial_ip.mac[1] = 0x00;
+    initial_ip.mac[2] = 0x00;
+    initial_ip.mac[3] = 0x00;
+    initial_ip.mac[4] = 0x00;
+    initial_ip.mac[5] = 0x02;
 
     uint32_t frames_received = 0;
     mbx.enableEoE(initial_ip,
